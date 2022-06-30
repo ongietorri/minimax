@@ -1,10 +1,10 @@
 import numpy as np
 import sys
 import os
+import glob
 import traceback
 from IPython.display import clear_output
 from itertools import groupby
-from time import sleep
 import random as rd
 import time
 import hashlib
@@ -46,6 +46,35 @@ class DumpTool:
         plt.savefig(fname, format=format)
         plt.close()  # don't show image
 
+    @staticmethod
+    def dump_digraph(boards_record, fname='test', rel_path=None):
+        """ dict of md5 -> {board, score, depth, is_max_player, children}"""
+        if not rel_path:
+            rel_path = './img'
+            if not os.path.exists('img'):
+                os.mkdir('./img')
+            else:
+                [os.remove(x) for x in glob.glob('./img/*')]
+
+        digraph = graphviz.Digraph(format='png')
+        for hsh, node in boards_record.items():
+            score, depth = node['score'], node['depth']
+            max_info = 'MAX' if node['is_max_player'] else 'MIN'
+            DumpTool.save_svg(fname=hsh, format='png', buf=node['board'])
+            digraph.node(hsh, label=f'{max_info} score={score} depth={depth}',
+                         image=f'{rel_path}/{hsh}.png', labelloc='t')
+
+            for c in node['children']:
+                child_hash, score, board = c['hash'], c['score'], c['board']
+                max_info = 'MAX' if c['is_max_player'] else 'MIN'
+
+                DumpTool.save_svg(fname=child_hash, format='png', buf=board)
+                digraph.node(child_hash, f'{max_info} score={score}',
+                             image=f'{rel_path}/{child_hash}.png', labelloc='t')
+                digraph.edge(hsh, child_hash, constraint='true')
+
+        digraph.render(filename=fname, cleanup=True)
+
 
 class TTFlags:
     LOWERBOUND = -1
@@ -69,9 +98,37 @@ class ConnectN:
         print(f'connect:{self.connect_n} minimax depth:{self.max_depth}')
 
         # transposition table sx * sy * nb players
+        self.player_to_color = {
+            ConnectN.HUMAN: 0,
+            ConnectN.AI: 1
+        }
         self.tt_keys = ConnectN.get_rand_bits(self.sx, self.sy)
+        self.zPlayer = list(map(np.uint64, [rd.getrandbits(64),  # HUMAN
+                                            rd.getrandbits(64)  # AI
+                                    ]))
         self.transposition_table = {}
 
+    # Transposition table storage - node is the lookup key for tt_entry
+    #
+    # ref: Alpha-Beta with Sibling Prediction Pruning in Chess, Jeroen W.T. Carolus (https://homepages.cwi.nl/~paulk/theses/Carolus.pdf)
+    # A typical entry in a transposition table would store the hash key together with the value that comes with
+    # the position. This can be an “exact” value  the value of a leaf in the search space, or the value that
+    # resulted in a cut-off: an upper bound or a lower bound. Also the depth of the node in the search space
+    # must be stored, because a transposition at a depth that is smaller than the current search depth is
+    # worthless.
+    def update_zobrist_hash(self, zobrist_hash: np.uint64, move_coord: tuple, player: int):
+        new_active_player = self.player_to_color[player]
+        old_active_player = (new_active_player + 1) % 2
+        tt_entry_move_coord = self.tt_keys[(*move_coord, new_active_player)]
+        new_zobrist_hash = np.uint64(zobrist_hash) ^ tt_entry_move_coord
+        # undo active player and set new
+        new_zobrist_hash ^= self.zPlayer[old_active_player]
+        new_zobrist_hash ^= self.zPlayer[new_active_player]
+
+        return new_zobrist_hash
+
+    def transposition_table_store(self, hash_key, score, depth, flag):
+        self.transposition_table[hash_key] = SimpleNamespace(hash_key=hash_key, score=score, depth=depth, flag=flag)
 
     @staticmethod
     def get_rand_bits(sx=7, sy=6):
@@ -80,42 +137,27 @@ class ConnectN:
         assert np.all(arr), arr
         return arr
 
+    @staticmethod
+    def get_tt_entry(arr, i, j, sx):
+        return arr[j + i * sx]
+
     def get_new_board(self) -> np.ndarray:
         return np.zeros(shape=(self.sy, self.sx), dtype=int)
 
     @staticmethod
-    def dump_digraph(boards_record, fname, rel_path=None):
-        if not rel_path:
-            rel_path = './img'
-        digraph = graphviz.Digraph(format='png')
-        for hsh, node in boards_record.items():
-            score, depth = node['score'], node['depth']
-            max_info = 'MAX' if node['is_max_player'] else 'MIN'
-            DumpTool.save_svg(fname=hsh, format='png', buf=node['board'])
-            digraph.node(hsh, label=f'{max_info} score={score} depth={depth}',
-                         image=f'{rel_path}/{hsh}.png', labelloc='t')
-
-            for c in node['children']:
-                child_hash, score, board = c['hash'], c['score'], c['board']
-                max_info = 'MAX' if c['is_max_player'] else 'MIN'
-
-                DumpTool.save_svg(fname=child_hash, format='png', buf=board)
-                digraph.node(child_hash, f'{max_info} score={score}',
-                             image=f'{rel_path}/{child_hash}.png', labelloc='t')
-                digraph.edge(hsh, child_hash, constraint='true')
-
-        digraph.render()
-
-    @staticmethod
-    def print(c4, cinfo=()):
+    def print(c4, use_chars=True, with_row_numbers=True, cinfo=()):
 
         sy, sx = c4.shape
-        symbols = {0: " . ", 1: " o ", -1: " x "}
+        if not use_chars:
+            symbols = {0: " . ", ConnectN.AI: " o ", ConnectN.HUMAN: " x "}
+        else:
+            symbols = {0: " . ", ConnectN.AI: " A ", ConnectN.HUMAN: " H "}
 
         header = [f"{x:02d}." for x in range(sx)]
+        if with_row_numbers: header.insert(0, ' ' * 3)
         print(*header)
         for i in range(sy):
-            L = []
+            L = [] if not with_row_numbers else [f'{i:02d}.']
             for j in range(sx):
                 v = symbols[c4[i, j]]
                 L.append(f"{v:3}")
@@ -169,27 +211,25 @@ class ConnectN:
                 if is_max_player:
                     solution = {}
                     t0 = time.process_time()
-                    if False:
-                        boards_record = {}
-                        score = self.minimax(c4, self.max_depth, alpha=-np.inf, beta=+np.inf, is_max_player=True,
-                                             solution=solution, boards_record=boards_record)
-                        # assert solution['depth'] == self.max_depth, f'incorrect depth for solution {solution}, max_depth={self.max_depth}'
-                    else:
-                        # score = self.negamax(c4, self.max_depth, -np.inf, +np.inf, ConnectN.AI, solution, zobrist_hash)
-                        solution = self.iterative_deepening_negamax(c4, -np.inf, +np.inf, ConnectN.AI, zobrist_hash)
+
+                    board_data_digraph = {}
+                    self.negamax(c4, self.max_depth, -np.inf, +np.inf, ConnectN.AI, solution, board_data_digraph,
+                                 zobrist_hash)
+
+                    # solution = self.iterative_deepening_negamax(c4, -np.inf, +np.inf, ConnectN.AI, zobrist_hash)
                     j = solution.get('col')
                     print(
                         f"[AI] {solution} (time:{round(time.process_time() - t0, 3)}s)")
 
                     # update the topmost board with the best found solution (AI)
                     if self.DUMP_MINIMAX:
-                        dump_boards = boards_record.copy()
-                        for k, v in boards_record.items():
+                        dump_boards = board_data_digraph.copy()
+                        for k, v in board_data_digraph.items():
                             if v['depth'] == self.max_depth:
-                                dump_boards[k]['board'] = self.play(
-                                    v['board'], j, True)
+                                dump_boards[k]['board'], _ = self.play(v['board'], j, True)
                                 break
-                        self.dump_digraph(dump_boards, 'test.png')
+                        print("dumping digraph....")
+                        DumpTool.dump_digraph(dump_boards)
                 else:
                     j = int(input("play:"))
 
@@ -250,35 +290,30 @@ class ConnectN:
                 return (j, 'V')
 
         # check for a diagonal win
-        for j in range(sx - connect_n + 1):
-            for i in range(connect_n - 1, sy):
-                line = []
-                for k in range(connect_n):
-                    line.append(board[i - k, j + k])
-                if not any(line):
+        def check_diag_win(board, flip=False):
+            if flip:
+                board = np.flip(board, axis=1)
+            for i in range(-sy, sx):
+                line = np.diag(board, k=i)
+                if not any(line) or len(line) < connect_n:
                     continue
-                line = np.array(line)
-                if np.all(line == ConnectN.AI) or np.all(line == ConnectN.HUMAN):
-                    return ((i, j), 'D0')
+                if has_win(line):
+                    return i, 'D0' if not flip else i, 'D1'
 
-        # check for an anti-diagonal win
-        for i in range(0, sy - connect_n + 1):
-            for j in range(sx - connect_n + 1):
-                line = []
-                for k in range(connect_n):
-                    line.append(board[i + k, j + k])
-                line = np.array(line)
-                if np.all(line == ConnectN.AI) or np.all(line == ConnectN.HUMAN):
-                    return ((i, j), 'D1')
-
-        return None
+        ans = check_diag_win(board)
+        if ans:
+            return ans
+        # anti diagonal
+        ans = check_diag_win(board, flip=True)
+        if ans:
+            return ans
 
     @staticmethod
-    def is_last_move(node, connect_n):
-        return node.reshape(6 * 7).tolist().count(0) == 1
+    def is_last_move(node):
+        return node.flatten().tolist().count(0) == 1
 
     @staticmethod
-    def score(node: np.array, connect_n: int, color) -> float:
+    def score(node: np.array, connect_n: int, player) -> float:
         ''' give a high value for a board if maximizer‘s turn or a low value for the board if minimizer‘s turn
             evaluation function: count the number of possible 4 in rows that each player can still make,
             and substract that from each other.
@@ -287,8 +322,8 @@ class ConnectN:
         sy, sx = node.shape
         score = 0
 
-        assert color in (ConnectN.AI, ConnectN.HUMAN)
-        pyr, opp = (ConnectN.AI, ConnectN.HUMAN) if color == ConnectN.AI else (ConnectN.AI, ConnectN.HUMAN)
+        assert player in (ConnectN.AI, ConnectN.HUMAN)
+        pyr, opp = (ConnectN.AI, ConnectN.HUMAN) if player == ConnectN.AI else (ConnectN.HUMAN, ConnectN.AI)
 
         def check_feature_2a(node, line, line_under=None):
             """ feature 2.a: A move can be made on either immediately adjacent columns """
@@ -324,170 +359,84 @@ class ConnectN:
             # https://pdfs.semanticscholar.org/f323/3fa36a5026b42c7f331a5c98e66aad9d3e8c.pdf
             return score
 
-        # special threat: horizontal 2-streak with 2 surrounding zeros
-        # with 1 on the left and 2 on the right or opposite => winning move
-        for i in range(sy):
-            line = node[i, :]
-
-            if not any(line):
-                continue
-            elif i < sy - 1 and 0 in node[i + 1, :]:
-                # line underneath is not fully filled, no need to check for threat
-                continue
-
-            for i in range(0, len(line) - connect_n + 2):
-                sub_line = line[i:i + connect_n + 1]
-                # check underneath line is filled
-                nb_connect_pyr = sub_line.tolist().count(pyr)
-                nb_connect_opp = sub_line.tolist().count(opp)
-                nb_connect_empty = sub_line.tolist().count(0)
-                if nb_connect_pyr == 2 and nb_connect_empty == 3 and \
-                        sub_line[0] == 0 and sub_line[-1] == 0:
-                    # print('plyr winner move')
-                    score += np.inf
-                elif nb_connect_opp == 2 and nb_connect_empty == 3 and \
-                        sub_line[0] == 0 and sub_line[-1] == 0:
-                    # print('opp winner move')
-                    score -= np.inf
-
-        # check for a horizontal win
-        for i in range(sy):
-            line = node[i, :]
-            if not any(line):
-                continue
-            for j in range(sx - connect_n + 1):
-                sub_line = line[j:j + connect_n]
-                score = get_updated_score(sub_line, score)
-
-        # check for a vertical win
-        for j in range(sx):
-            line = node[:, j]
-            if not any(line):
-                continue
-            for i in range(0, sy - connect_n + 1):
-                sub_line = line[i:i + connect_n]
-                score = get_updated_score(sub_line, score)
-
-        # check for a diagonal win
-        for j in range(sx - connect_n + 1):
-            for i in range(connect_n - 1, sy):
-                sub_line = []
-                for k in range(connect_n):
-                    sub_line.append(node[i - k, j + k])
+        def get_score_special_horizontal_threat(score):
+            """ special threat: horizontal 2-streak with 2 surrounding zeros
+                with 1 on the left and 2 on the right or opposite => winning move """
+            for i in range(sy):
+                line = node[i, :]
                 if not any(line):
                     continue
-                score = get_updated_score(np.array(sub_line), score)
 
-        # check for an anti-diagonal win
-        for i in range(0, sy - connect_n + 1):
-            for j in range(sx - connect_n + 1):
-                sub_line = []
-                for k in range(connect_n):
-                    sub_line.append(node[i + k, j + k])
-                score = get_updated_score(np.array(sub_line), score)
+                for j in range(0, len(line) - connect_n):
+                    sub_line = line[j:j + connect_n + 1]
+                    if i < sy - 1:  # check underneath line is filled
+                        sub_line_beneath = node[i + 1, j:j + connect_n + 1]
+                        if 0 in sub_line_beneath:
+                            # line underneath is not fully filled, no need to check for threat
+                            continue
+
+                    if sub_line.tolist() == [0, pyr, pyr, pyr, 0]:
+                        return np.inf
+                    elif sub_line.tolist() == [0, opp, opp, opp, 0]:
+                        return -np.inf
+
+            return score
+        score = get_score_special_horizontal_threat(score)
+        if score in [np.inf, -np.inf]:
+            return score
+
+        # check for a horizontal win
+        def check_horiz_win(score):
+            for i in range(sy):
+                line = node[i, :]
+                if not any(line):
+                    continue
+                for j in range(sx - connect_n + 1):
+                    sub_line = line[j:j + connect_n]
+                    score = get_updated_score(sub_line, score)
+                    if score in [np.inf, -np.inf]:
+                        return score
+            return score
+        score = check_horiz_win(score)
+        if score in [np.inf, -np.inf]:
+            return score
+
+        # check for a vertical win
+        def check_vert_win(score):
+            for j in range(sx):
+                line = node[:, j]
+                if not any(line):
+                    continue
+                for i in range(0, sy - connect_n + 1):
+                    sub_line = line[i:i + connect_n]
+                    score = get_updated_score(sub_line, score)
+                    if score in [np.inf, -np.inf]:
+                        return score
+            return score
+        score = check_vert_win(score)
+        if score in [np.inf, -np.inf]:
+            return score
+
+        # check for a diagonal win
+        def check_diag_win(score, node):
+            for i in range(-sy, sx):
+                line = np.diag(node, k=i)
+                if not any(line) or len(line) < connect_n:
+                    continue
+                for j in range(len(line) - connect_n + 1):
+                    sub_line = line[j:j + connect_n]
+                    score = get_updated_score(sub_line, score)
+                    if score in [np.inf, -np.inf]:
+                        return score
+            return score
+        score = check_diag_win(score, node)
+        if score in [np.inf, -np.inf]:
+            return score
+
+        # anti-diag win
+        score = check_diag_win(score, np.flip(node, axis=1))
 
         return score
-
-    def minimax(self, board: np.ndarray, depth: int, alpha: float, beta: float, is_max_player: bool, solution,
-                boards_record: dict) -> float:
-
-        # print('depth=', depth)
-        assert alpha < beta
-
-        sy, sx = board.shape
-
-        # When the depth limit of the search is exceeded,
-        # score the node as if it were a leaf
-        # The heuristic value is a score measuring the favorability of the node for the maximizing player.
-        if depth == 0 or ConnectN.is_last_move(board, self.connect_n) or ConnectN.is_winning_move(board,
-                                                                                                  self.connect_n):
-            return ConnectN.score(board, self.connect_n)
-
-        if self.DUMP_MINIMAX:
-            root_board_hash = self.hash_board(board)
-            boards_record[root_board_hash] = {'board': board, 'children': [
-            ], 'score': None, 'depth': depth, 'is_max_player': is_max_player}
-
-        if is_max_player:
-            value = -np.inf
-            for k in range(0, sx):
-                if 0 in board[:, k]:
-                    solution['nb_node_explore'] = solution.get(
-                        'nb_node_explore', 0) + 1
-                    b = ConnectN.play(board, k, True)
-
-                    value_new = self.minimax(
-                        b, depth - 1, alpha, beta, (not is_max_player), solution, boards_record)
-
-                    if self.DUMP_MINIMAX:
-                        boards_record[root_board_hash]['children'].append({
-                            'board': b,
-                            'hash': self.hash_board(b),
-                            'score': value_new,
-                            'is_max_player': is_max_player if depth > 1 else not is_max_player
-                        })
-
-                    if value_new > value:  # maximize value
-                        value = value_new
-                        if depth == self.max_depth:
-                            solution.update(
-                                {'col': k, 'depth': depth, 'score': value, 'is_max_player': is_max_player})
-
-                    if value >= beta:  # beta pruning
-                        solution['nb_beta_prune'] = solution.get(
-                            'nb_beta_prune', 0) + 1
-                        break
-
-                    alpha = max(alpha, value)  # no fail-soft
-
-        else:
-            value = +np.inf
-            for k in range(0, sx):
-                if 0 in board[:, k]:
-                    solution['nb_node_explore'] = solution.get(
-                        'nb_node_explore', 0) + 1
-                    b = ConnectN.play(board, k, False)
-
-                    value_new = self.minimax(
-                        b, depth - 1, alpha, beta, (not is_max_player), solution, boards_record)
-
-                    if self.DUMP_MINIMAX:
-                        boards_record[root_board_hash]['children'].append({
-                            'board': b,
-                            'hash': self.hash_board(b),
-                            'score': value_new,
-                            'is_max_player': is_max_player if depth > 1 else not is_max_player
-                        })
-
-                    if value_new < value:  # minimize value
-                        value = value_new
-                        # solution.update({'col': k, 'depth': depth, 'score': value,'is_max_player': is_max_player})
-
-                    if value <= alpha:  # alpha pruning
-                        solution['nb_alpha_prune'] = solution.get(
-                            'nb_alpha_prune', 0) + 1
-                        break
-
-                    beta = min(beta, value)  # no fail-soft
-
-        if self.DUMP_MINIMAX:
-            boards_record[root_board_hash]['score'] = value
-        return value
-
-    # Transposition table storage - node is the lookup key for tt_entry
-    #
-    # ref: Alpha-Beta with Sibling Prediction Pruning in Chess, Jeroen W.T. Carolus (https://homepages.cwi.nl/~paulk/theses/Carolus.pdf)
-    # A typical entry in a transposition table would store the hash key together with the value that comes with
-    # the position. This can be an “exact” value  the value of a leaf in the search space, or the value that
-    # resulted in a cut-off: an upper bound or a lower bound. Also the depth of the node in the search space
-    # must be stored, because a transposition at a depth that is smaller than the current search depth is
-    # worthless.
-    def update_zobrist_hash(self, zobrist_hash, move_coord, color):
-        tt_entry_move_coord = self.tt_keys[(*move_coord, 0 if color == ConnectN.HUMAN else 1)]
-        return np.uint64(zobrist_hash) ^ tt_entry_move_coord
-
-    def transposition_table_store(self, hash_key, score, depth, flag):
-        self.transposition_table[hash_key] = SimpleNamespace(hash_key=hash_key, score=score, depth=depth, flag=flag)
 
     def iterative_deepening_negamax(self, board: np.ndarray, alpha: float, beta: float, color: int,
                                     zobrist_hash: np.uint64 = 0, max_sec_elapsed: int = 2) -> float:
@@ -511,76 +460,133 @@ class ConnectN:
 
         return solution_iterative_deepening
 
-    def negamax(self, board: np.ndarray, depth: int, alpha: float, beta: float, color: int,
-                solution: dict, zobrist_hash: np.uint64 = 0) -> float:
+    @staticmethod
+    def quiescent_search(board, alpha, beta, player, connect_n=4):
+        """
+        Avoid the horizon effect. See https://www.chessprogramming.org/Quiescence_Search
+        """
+
+        score = player * ConnectN.score(board, connect_n, ConnectN.AI)
+
+        alpha = max(score, alpha)
+
+        if score >= beta:
+            return beta
+
+        # examine every opponent capture and see if this sucks
+        sy, sx = board.shape
+
+        for k in range(0, sx):
+            zero_indices = np.where(board[:, k] == 0)[0]
+            if not len(zero_indices):
+                continue
+
+            b, _ = ConnectN.play(board, k, True if player == ConnectN.AI else False)
+            score = -ConnectN.quiescent_search(b, -beta, -alpha, -player)
+
+            alpha = max(score, alpha)
+
+            if score >= beta:
+                break
+
+        return score
+
+    def negamax(self, board: np.ndarray, depth: int, alpha: float, beta: float, player: int,
+                solution: dict, board_data: dict, zobrist_hash: np.uint64 = 0) -> float:
 
         sy, sx = board.shape
 
-        tt_entry = self.transposition_table.get(zobrist_hash)
-        if tt_entry and tt_entry.depth >= depth:
-            # print(f'*** CACHE HIT depth:{depth} alpha:{alpha} beta:{beta} color:{color} tt_entry:{tt_entry} ***')
-            solution['cache_hit'] = solution.get('cache_hit', 0) + 1
-            if tt_entry.flag == 'EXACT': # stored value is exact
-                return tt_entry.score
-            elif tt_entry.flag == 'LOWERBOUND': # update lowerbound beta if needed
-                alpha = max(alpha, tt_entry.score)
-            elif tt_entry.flag == 'UPPERBOUND': # update upperbound beta if needed
-                beta = min(beta, tt_entry.score)
-
-            if alpha >= beta:
-                return tt_entry.score
+        # tt_entry = self.transposition_table.get(zobrist_hash)
+        # if tt_entry and tt_entry.depth >= depth:
+        #     # print(f'*** CACHE HIT depth:{depth} alpha:{alpha} beta:{beta} color:{color} tt_entry:{tt_entry} ***')
+        #     solution['cache_hit'] = solution.get('cache_hit', 0) + 1
+        #     if tt_entry.flag == 'EXACT':  # stored value is exact
+        #         return tt_entry.score
+        #     elif tt_entry.flag == 'LOWERBOUND':  # update lowerbound beta if needed
+        #         alpha = max(alpha, tt_entry.score)
+        #     elif tt_entry.flag == 'UPPERBOUND':  # update upperbound beta if needed
+        #         beta = min(beta, tt_entry.score)
+        #
+        #     if alpha >= beta:
+        #         return tt_entry.score
 
         # When the depth limit of the search is exceeded,
         # score the node as if it were a leaf
-        if depth == 0 or ConnectN.is_last_move(board, self.connect_n) or ConnectN.is_winning_move(board,
-                                                                                                  self.connect_n):
-            score = color * ConnectN.score(board, self.connect_n, ConnectN.AI)
-            if score <= alpha:
-                self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
-            elif score >= beta:
-                self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
-            else:
-                self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
+        if depth == 0 or ConnectN.is_last_move(board):
+            score = ConnectN.score(board, self.connect_n, player)
+            #    score = player * ConnectN.score(board, self.connect_n, ConnectN.AI)
+            #else:
+            #    score = ConnectN.quiescent_search(board, alpha, beta, -player)
+            # if score <= alpha:
+            #     self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
+            # elif score >= beta:
+            #     self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
+            # else:
+            #     self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
             return score
+
+        if self.DUMP_MINIMAX:
+            hsh = hashlib.md5(board.tostring()).hexdigest()
+            board_data[hsh] = dict(board=board, depth=depth, hash=hsh,
+                                   is_max_player=True if player == ConnectN.AI else False,
+                                   children=[])
 
         score = -np.inf
         for k in range(0, sx):
             zero_indices = np.where(board[:, k] == 0)[0]
-            if len(zero_indices):
-                solution['nb_node_explore'] = solution.get(
-                    'nb_node_explore', 0) + 1
+            if not len(zero_indices):
+                continue
 
-                move_coord = (zero_indices[-1], k)
-                new_zobrist_hash = self.update_zobrist_hash(zobrist_hash, move_coord, color)
+            solution['nb_node_explore'] = solution.get('nb_node_explore', 0) + 1
 
-                b, _ = ConnectN.play(board, k, True if color == ConnectN.AI else False)
-                new_score = -self.negamax(b, depth-1, -beta, -alpha, -color,
-                                          solution, new_zobrist_hash)
+            play_coord = (zero_indices[-1], k)
+            new_zobrist_hash = self.update_zobrist_hash(zobrist_hash, play_coord, player)
 
-                if new_score > score:
-                    score = new_score
-                    if depth == self.max_depth:
-                        solution.update(
-                            {'col': k, 'score': score, 'color': color})
+            b, _ = ConnectN.play(board, k, True if player == ConnectN.AI else False)
+            new_score = -self.negamax(b, depth-1, -beta, -alpha, -player,
+                                      solution, board_data, new_zobrist_hash)
 
-                alpha = max(alpha, score)
+            if self.DUMP_MINIMAX:
+                hsh_child = hashlib.md5(b.tostring()).hexdigest()
+                board_data[hsh]['children'] += [dict(board=b, score=new_score, hash=hsh_child,
+                                                     is_max_player=True if -player == ConnectN.AI else False)]
+            # else:
+            #     print('\t' * depth, f"<{'H' if player == ConnectN.HUMAN else 'AI'}> score:{new_score} depth:{depth} "
+            #                         f"played:{play_coord} b:{b[:, k]}", sep='')
 
-                # if alpha >= beta:  # or score >= beta ???
-                if score >= beta:
-                    solution['nb_prune'] = solution.get('nb_prune', 0) + 1
-                    break  # cut-off
+            # max(new_score, score)
+            if new_score > score:
+                score = new_score
+                if depth == self.max_depth:
+                    assert player == ConnectN.AI, f'(alpha pruning) play:{play_coord}, score:{score} board:\n{board}'
+                    solution.update(
+                        {'move': play_coord, 'col': k, 'score': score, 'player': 'HUMAN' if player == ConnectN.HUMAN else 'AI'})
 
-        if score <= alpha: # a lowerbound value
-            self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
-        elif score >= beta: # an upperbound value
-            self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
-        else: # a true minimax value
-            self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
+            alpha = max(alpha, score)
+
+            # if alpha >= beta:  # or score >= beta ???
+            if score >= beta:
+                solution['nb_prune'] = solution.get('nb_prune', 0) + 1
+                if depth == self.max_depth:
+                    assert player == ConnectN.AI,  f'(beta pruning) play:{play_coord}, score:{score} board:\n{board}'
+                    solution.update(
+                        {'move': play_coord, 'col': k, 'score': score, 'player': 'HUMAN' if player == ConnectN.HUMAN else 'AI'})
+                break  # cut-off
+
+        # if score <= alpha: # a lowerbound value
+        #     self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
+        # elif score >= beta: # an upperbound value
+        #     self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
+        # else: # a true minimax value
+        #     self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
+
+        if self.DUMP_MINIMAX:
+            board_data[hsh]['score'] = score
 
         return score
 
 
 if __name__ == '__main__':
-    connect_four = ConnectN(max_depth=6)
+    connect_four = ConnectN(max_depth=4)
     connect_four.DUMP_MINIMAX = False
     connect_four.run()
