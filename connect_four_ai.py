@@ -197,7 +197,13 @@ class ConnectN:
 
         is_max_player = False  # e.g. is AI playing?
         is_game_over = False
-        c4 = self.get_new_board()
+        #c4 = self.get_new_board()
+        c4 = np.array([[0, 0, 0, 0, 0, 0, 0],
+                      [0, 0, 0, 0, 0, 0, 0],
+                      [0, 0, 0, 0, 0, 0, 0],
+                      [0, 0, 0, 0, 0, 0, 0],
+                      [0, 0, 0, 1, 1, 0, 0], # => play (4,5)
+                      [0, 0, 1, -1, -1, 0, 0]]).reshape(6, 7)
         in_error = False
         zobrist_hash = 0
 
@@ -260,7 +266,7 @@ class ConnectN:
         return max_connect
 
     @staticmethod
-    def is_winning_move(board, connect_n):
+    def is_winning_move(board, connect_n=4):
 
         sy, sx = board.shape
         assert (
@@ -348,11 +354,11 @@ class ConnectN:
                 return +np.inf
             elif nb_connect_pyr == 3 and nb_connect_empty == 1:
                 score += 300
-            elif nb_connect_pyr == 2 and nb_connect_empty == 2:
-                score += 200
-
+            # elif nb_connect_pyr == 2 and nb_connect_empty == 2:
+            #     score += 200
+            #
             if nb_connect_opp == 3 and nb_connect_empty == 1:
-                score -= 500
+                score -= 300
             elif nb_connect_opp == 4:
                 return -np.inf
 
@@ -381,9 +387,9 @@ class ConnectN:
                         return -np.inf
 
             return score
-        score = get_score_special_horizontal_threat(score)
-        if score in [np.inf, -np.inf]:
-            return score
+        #score = get_score_special_horizontal_threat(score)
+        #if score in [np.inf, -np.inf]:
+        #    return score
 
         # check for a horizontal win
         def check_horiz_win(score):
@@ -461,35 +467,25 @@ class ConnectN:
         return solution_iterative_deepening
 
     @staticmethod
-    def quiescent_search(board, alpha, beta, player, connect_n=4):
-        """
-        Avoid the horizon effect. See https://www.chessprogramming.org/Quiescence_Search
-        """
+    def quiescence_search(board, alpha, beta, player, connect_n = 4):
 
-        score = player * ConnectN.score(board, connect_n, ConnectN.AI)
+        # null move
+        bestv = ConnectN.score(board, connect_n, player)
 
-        alpha = max(score, alpha)
-
-        if score >= beta:
-            return beta
-
-        # examine every opponent capture and see if this sucks
         sy, sx = board.shape
-
         for k in range(0, sx):
             zero_indices = np.where(board[:, k] == 0)[0]
             if not len(zero_indices):
                 continue
 
-            b, _ = ConnectN.play(board, k, True if player == ConnectN.AI else False)
-            score = -ConnectN.quiescent_search(b, -beta, -alpha, -player)
+            if bestv >= beta:
+               break
 
-            alpha = max(score, alpha)
+            b, _ = ConnectN.play(board, k, True if player == ConnectN.AI else False)  # play HUMAN
+            v = ConnectN.quiescence_search(b, -beta, -bestv, -player)
+            bestv = max(v, bestv)
 
-            if score >= beta:
-                break
-
-        return score
+        return bestv
 
     def negamax(self, board: np.ndarray, depth: int, alpha: float, beta: float, player: int,
                 solution: dict, board_data: dict, zobrist_hash: np.uint64 = 0) -> float:
@@ -512,9 +508,13 @@ class ConnectN:
 
         # When the depth limit of the search is exceeded,
         # score the node as if it were a leaf
-        if depth == 0 or ConnectN.is_last_move(board):
-            score = ConnectN.score(board, self.connect_n, player)
-            #    score = player * ConnectN.score(board, self.connect_n, ConnectN.AI)
+        if ConnectN.is_last_move(board) or ConnectN.is_winning_move(board):  # terminal node
+            return ConnectN.score(board, self.connect_n, player)
+        elif depth == 0:
+            print('quiescent')
+            #score = ConnectN.quiescent_search(board, alpha, beta, ConnectN.AI)
+            score = ConnectN.quiescence_search(board, alpha, beta, player)
+            #score = ConnectN.score(board, self.connect_n, player)
             #else:
             #    score = ConnectN.quiescent_search(board, alpha, beta, -player)
             # if score <= alpha:
@@ -550,9 +550,6 @@ class ConnectN:
                 hsh_child = hashlib.md5(b.tostring()).hexdigest()
                 board_data[hsh]['children'] += [dict(board=b, score=new_score, hash=hsh_child,
                                                      is_max_player=True if -player == ConnectN.AI else False)]
-            # else:
-            #     print('\t' * depth, f"<{'H' if player == ConnectN.HUMAN else 'AI'}> score:{new_score} depth:{depth} "
-            #                         f"played:{play_coord} b:{b[:, k]}", sep='')
 
             # max(new_score, score)
             if new_score > score:
@@ -587,6 +584,8 @@ class ConnectN:
 
 
 if __name__ == '__main__':
-    connect_four = ConnectN(max_depth=4)
+    connect_four = ConnectN(max_depth=1)
     connect_four.DUMP_MINIMAX = False
     connect_four.run()
+
+    # sys.exit(0)
