@@ -86,7 +86,7 @@ class ConnectN:
     HUMAN, AI = -1, +1
     DUMP_MINIMAX = False
 
-    def __init__(self, connect_n=4, sx=7, sy=6, max_depth=3):
+    def __init__(self, connect_n=4, sx=7, sy=6, max_depth=3, use_caching=True):
 
         assert (
                 sx >= connect_n and sy >= connect_n
@@ -102,10 +102,12 @@ class ConnectN:
             ConnectN.HUMAN: 0,
             ConnectN.AI: 1
         }
-        self.tt_keys = ConnectN.get_rand_bits(self.sx, self.sy)
-        self.zPlayer = list(map(np.uint64, [rd.getrandbits(64),  # HUMAN
-                                            rd.getrandbits(64)  # AI
-                                    ]))
+
+        self.use_caching = use_caching
+        self.tt_keys = ConnectN.get_rand_bits(self.sx, self.sy)  # sx * sx * 2 (AI or HUMAN chessman)
+        self.tt_player = list(map(np.uint64, [rd.getrandbits(64),  # HUMAN
+                                              rd.getrandbits(64)  # AI
+                                              ]))
         self.transposition_table = {}
 
     # Transposition table storage - node is the lookup key for tt_entry
@@ -118,12 +120,13 @@ class ConnectN:
     # worthless.
     def update_zobrist_hash(self, zobrist_hash: np.uint64, move_coord: tuple, player: int):
         new_active_player = self.player_to_color[player]
-        old_active_player = (new_active_player + 1) % 2
-        tt_entry_move_coord = self.tt_keys[(*move_coord, new_active_player)]
-        new_zobrist_hash = np.uint64(zobrist_hash) ^ tt_entry_move_coord
+        old_active_player = -new_active_player
+        move_coord_hash = self.tt_keys[(*move_coord, new_active_player)]
+        # do new move
+        new_zobrist_hash = np.uint64(zobrist_hash) ^ move_coord_hash
         # undo active player and set new
-        new_zobrist_hash ^= self.zPlayer[old_active_player]
-        new_zobrist_hash ^= self.zPlayer[new_active_player]
+        new_zobrist_hash ^= self.tt_player[old_active_player]
+        new_zobrist_hash ^= self.tt_player[new_active_player]
 
         return new_zobrist_hash
 
@@ -354,11 +357,11 @@ class ConnectN:
                 return +np.inf
             elif nb_connect_pyr == 3 and nb_connect_empty == 1:
                 score += 300
-            # elif nb_connect_pyr == 2 and nb_connect_empty == 2:
-            #     score += 200
-            #
+            elif nb_connect_pyr == 2 and nb_connect_empty == 2:
+                score += 200
+
             if nb_connect_opp == 3 and nb_connect_empty == 1:
-                score -= 300
+                score -= 500
             elif nb_connect_opp == 4:
                 return -np.inf
 
@@ -470,7 +473,7 @@ class ConnectN:
     def quiescence_search(board, alpha, beta, player, connect_n = 4):
 
         # null move
-        bestv = ConnectN.score(board, connect_n, player)
+        bestv = ConnectN.score(board, connect_n, -player)
 
         sy, sx = board.shape
         for k in range(0, sx):
@@ -492,37 +495,34 @@ class ConnectN:
 
         sy, sx = board.shape
 
-        # tt_entry = self.transposition_table.get(zobrist_hash)
-        # if tt_entry and tt_entry.depth >= depth:
-        #     # print(f'*** CACHE HIT depth:{depth} alpha:{alpha} beta:{beta} color:{color} tt_entry:{tt_entry} ***')
-        #     solution['cache_hit'] = solution.get('cache_hit', 0) + 1
-        #     if tt_entry.flag == 'EXACT':  # stored value is exact
-        #         return tt_entry.score
-        #     elif tt_entry.flag == 'LOWERBOUND':  # update lowerbound beta if needed
-        #         alpha = max(alpha, tt_entry.score)
-        #     elif tt_entry.flag == 'UPPERBOUND':  # update upperbound beta if needed
-        #         beta = min(beta, tt_entry.score)
-        #
-        #     if alpha >= beta:
-        #         return tt_entry.score
+        tt_entry = self.transposition_table.get(zobrist_hash)
+        if tt_entry and tt_entry.depth >= depth:
+            #print(f'*** CACHE HIT depth:{depth} alpha:{alpha} beta:{beta} player:{player} tt_entry:{tt_entry} ***')
+            solution['cache_hit'] = solution.get('cache_hit', 0) + 1
+            if self.use_caching:
+                if tt_entry.flag == 'EXACT':  # stored value is exact
+                    return tt_entry.score
+                elif tt_entry.flag == 'LOWERBOUND':  # update lowerbound beta if needed
+                    alpha = max(alpha, tt_entry.score)
+                elif tt_entry.flag == 'UPPERBOUND':  # update upperbound beta if needed
+                    beta = min(beta, tt_entry.score)
+
+            if alpha >= beta:
+                return tt_entry.score
 
         # When the depth limit of the search is exceeded,
         # score the node as if it were a leaf
         if ConnectN.is_last_move(board) or ConnectN.is_winning_move(board):  # terminal node
             return ConnectN.score(board, self.connect_n, player)
         elif depth == 0:
-            print('quiescent')
-            #score = ConnectN.quiescent_search(board, alpha, beta, ConnectN.AI)
             score = ConnectN.quiescence_search(board, alpha, beta, player)
-            #score = ConnectN.score(board, self.connect_n, player)
-            #else:
-            #    score = ConnectN.quiescent_search(board, alpha, beta, -player)
-            # if score <= alpha:
-            #     self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
-            # elif score >= beta:
-            #     self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
-            # else:
-            #     self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
+            if self.use_caching:
+                if score <= alpha:
+                    self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
+                elif score >= beta:
+                    self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
+                else:
+                    self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
             return score
 
         if self.DUMP_MINIMAX:
@@ -570,12 +570,13 @@ class ConnectN:
                         {'move': play_coord, 'col': k, 'score': score, 'player': 'HUMAN' if player == ConnectN.HUMAN else 'AI'})
                 break  # cut-off
 
-        # if score <= alpha: # a lowerbound value
-        #     self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
-        # elif score >= beta: # an upperbound value
-        #     self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
-        # else: # a true minimax value
-        #     self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
+        if self.use_caching:
+            if score <= alpha: # a lowerbound value
+                self.transposition_table_store(zobrist_hash, score, depth, 'LOWERBOUND')
+            elif score >= beta: # an upperbound value
+                self.transposition_table_store(zobrist_hash, score, depth, 'UPPERBOUND')
+            else: # a true minimax value
+                self.transposition_table_store(zobrist_hash, score, depth, 'EXACT')
 
         if self.DUMP_MINIMAX:
             board_data[hsh]['score'] = score
@@ -584,7 +585,7 @@ class ConnectN:
 
 
 if __name__ == '__main__':
-    connect_four = ConnectN(max_depth=1)
+    connect_four = ConnectN(max_depth=5, use_caching=True)
     connect_four.DUMP_MINIMAX = False
     connect_four.run()
 
