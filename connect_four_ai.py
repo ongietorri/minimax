@@ -92,7 +92,9 @@ class ConnectN:
                 sx >= connect_n and sy >= connect_n
         ), f"invalid dimensions / n-connect number: ({sx}, {sy}) => ({connect_n}) ?!"
 
-        self.sx, self.sy, self.connect_n, self.max_depth = sx, sy, connect_n, max_depth
+        # global_max_depth is used for iterative deepening
+        self.sx, self.sy, self.connect_n, self.max_depth, self.global_max_depth =\
+            sx, sy, connect_n, max_depth, max_depth
 
         assert max_depth >= 1, 'minimum depth is 1'
         print(f'connect:{self.connect_n} minimax depth:{self.max_depth}')
@@ -222,10 +224,10 @@ class ConnectN:
                     t0 = time.process_time()
 
                     board_data_digraph = {}
-                    self.negamax(c4, self.max_depth, -np.inf, +np.inf, ConnectN.AI, solution, board_data_digraph,
-                                 zobrist_hash)
+                    #self.negamax(c4, self.max_depth, -np.inf, +np.inf, ConnectN.AI, solution, board_data_digraph,
+                    #             zobrist_hash)
 
-                    # solution = self.iterative_deepening_negamax(c4, -np.inf, +np.inf, ConnectN.AI, zobrist_hash)
+                    solution = self.iterative_deepening_negamax(c4, -np.inf, +np.inf, ConnectN.AI, zobrist_hash)
                     j = solution.get('col')
                     print(
                         f"[AI] {solution} (time:{round(time.process_time() - t0, 3)}s)")
@@ -448,24 +450,22 @@ class ConnectN:
         return score
 
     def iterative_deepening_negamax(self, board: np.ndarray, alpha: float, beta: float, color: int,
-                                    zobrist_hash: np.uint64 = 0, max_sec_elapsed: int = 2) -> float:
+                                    zobrist_hash: np.uint64 = 0, max_sec_elapsed: int = 1) -> float:
 
         solution_iterative_deepening = {}
 
-        depth = 1
-        self.max_depth = depth
+        self.max_depth = 1
         self.transposition_table.clear()
 
         start_time = time.process_time()
-        while time.process_time() - start_time <= max_sec_elapsed:
-            print(f'iterative deepening, processing for max depth: {depth}')
+        while time.process_time() - start_time <= max_sec_elapsed and self.max_depth <= self.global_max_depth:
+            print(f'iterative deepening, processing for max depth: {self.max_depth}/{self.global_max_depth}')
             solution = {}
-            self.negamax(board, depth, alpha, beta, color, solution, zobrist_hash)
+            self.negamax(board, self.max_depth, alpha, beta, color, solution, zobrist_hash)
             print('solution:', solution)
             solution_iterative_deepening = solution.copy()
 
-            depth += 1
-            self.max_depth = depth
+            self.max_depth += 1
 
         return solution_iterative_deepening
 
